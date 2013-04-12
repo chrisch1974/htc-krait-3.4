@@ -25,6 +25,7 @@
 #ifndef __HCI_CORE_H
 #define __HCI_CORE_H
 
+#include <linux/interrupt.h>
 #include <net/bluetooth/hci.h>
 
 #define HCI_PROTO_L2CAP	0

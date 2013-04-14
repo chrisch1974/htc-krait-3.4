@@ -1034,11 +1034,13 @@ struct sensor_pict_fps {
 struct exp_gain_cfg {
 	uint16_t gain;
 	uint32_t line;
+#ifndef CONFIG_SENSE4_HAL
 	uint32_t long_line;
 	uint32_t short_line;
 	uint16_t long_dig_gain;
 	uint16_t short_dig_gain;
 	uint8_t is_outdoor;
+#endif
 	uint16_t dig_gain; 
 };
 
@@ -1147,7 +1149,9 @@ struct msm_sensor_output_info_t {
 	uint16_t y_even_inc;
 	uint16_t y_odd_inc;
 	uint8_t binning_rawchip;
+#ifndef CONFIG_SENSE4_HAL
 	uint8_t is_hdr;
+#endif
 	
 };
 
@@ -1286,9 +1290,10 @@ struct sensor_cfg_data {
 	int mode;
 	int rs;
 	uint8_t max_steps;
+#ifndef CONFIG_SENSE4_HAL
 	int8_t sensor_ver;
   af_value_t af_value;
-
+#endif
 	union {
 		int8_t effect;
 		uint8_t lens_shading;
@@ -1647,10 +1652,14 @@ struct msm_camsensor_info {
 	int mount_angle;
 	uint32_t max_width;
 	uint32_t max_height;
+#ifndef CONFIG_SENSE4_HAL
 	enum htc_camera_image_type htc_image;	
 	uint8_t hdr_mode;	
+#endif
 	uint8_t use_rawchip; 
+#ifndef CONFIG_SENSE4_HAL
 	uint8_t video_hdr_capability;
+#endif
 };
 
 #define V4L2_SINGLE_PLANE	0

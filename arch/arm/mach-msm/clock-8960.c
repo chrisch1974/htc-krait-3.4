@@ -5558,6 +5558,17 @@ static struct clk_lookup msm_clocks_8960_common[] = {
 	CLK_LOOKUP("cam_clk",		cam2_clk.c,		NULL),
 	CLK_LOOKUP("cam_clk",		cam0_clk.c,	"4-0020"),
 	CLK_LOOKUP("cam_clk",		cam0_clk.c,	"4-0034"),
+#ifdef CONFIG_SENSE4_HAL
+	CLK_LOOKUP("csi_src_clk",	csi0_src_clk.c,		"msm_csid.0"),
+	CLK_LOOKUP("csi_src_clk",	csi1_src_clk.c,		"msm_csid.1"),
+	CLK_LOOKUP("csi_src_clk",	csi2_src_clk.c,		"msm_csid.2"),
+	CLK_LOOKUP("csi_clk",		csi0_clk.c,		"msm_csid.0"),
+	CLK_LOOKUP("csi_clk",		csi1_clk.c,		"msm_csid.1"),
+	CLK_LOOKUP("csi_clk",		csi2_clk.c,		"msm_csid.2"),
+	CLK_LOOKUP("csi_phy_clk",	csi0_phy_clk.c,		"msm_csid.0"),
+	CLK_LOOKUP("csi_phy_clk",	csi1_phy_clk.c,		"msm_csid.1"),
+	CLK_LOOKUP("csi_phy_clk",	csi2_phy_clk.c,		"msm_csid.2"),
+#else
 	CLK_LOOKUP("csi_src_clk",	csi0_src_clk.c,		"msm_csiphy.0"),
 	CLK_LOOKUP("csi_src_clk",	csi1_src_clk.c,		"msm_csiphy.1"),
 	CLK_LOOKUP("csi_src_clk",	csi2_src_clk.c,		"msm_csiphy.2"),
@@ -5567,6 +5578,7 @@ static struct clk_lookup msm_clocks_8960_common[] = {
 	CLK_LOOKUP("csi_phy_clk",	csi0_phy_clk.c,		"msm_csiphy.0"),
 	CLK_LOOKUP("csi_phy_clk",	csi1_phy_clk.c,		"msm_csiphy.1"),
 	CLK_LOOKUP("csi_phy_clk",	csi2_phy_clk.c,		"msm_csiphy.2"),
+#endif
 	CLK_LOOKUP("csi_pix_clk",	csi_pix_clk.c,		"msm_ispif.0"),
 	CLK_LOOKUP("csi_rdi_clk",	csi_rdi_clk.c,		"msm_ispif.0"),
 	CLK_LOOKUP("csi_src_clk",	csi2_src_clk.c,		NULL),
@@ -5629,9 +5641,15 @@ static struct clk_lookup msm_clocks_8960_common[] = {
 	CLK_LOOKUP("bus_clk",		vpe_axi_clk.c,	"footswitch-8x60.9"),
 	CLK_LOOKUP("arb_clk",		amp_p_clk.c,		"mipi_dsi.1"),
 	CLK_LOOKUP("arb_clk",		amp_p_clk.c,		"mipi_dsi.2"),
+#ifdef CONFIG_SENSE4_HAL
+	CLK_LOOKUP("csi_pclk",		csi_p_clk.c,		"msm_csid.0"),
+	CLK_LOOKUP("csi_pclk",		csi_p_clk.c,		"msm_csid.1"),
+	CLK_LOOKUP("csi_pclk",		csi_p_clk.c,		"msm_csid.2"),
+#else
 	CLK_LOOKUP("csi_pclk",		csi_p_clk.c,		"msm_csiphy.0"),
 	CLK_LOOKUP("csi_pclk",		csi_p_clk.c,		"msm_csiphy.1"),
 	CLK_LOOKUP("csi_pclk",		csi_p_clk.c,		"msm_csiphy.2"),
+#endif
 	CLK_LOOKUP("master_iface_clk",	dsi1_m_p_clk.c,		"mipi_dsi.1"),
 	CLK_LOOKUP("slave_iface_clk",	dsi1_s_p_clk.c,		"mipi_dsi.1"),
 	CLK_LOOKUP("master_iface_clk",	dsi2_m_p_clk.c,		"mipi_dsi.2"),

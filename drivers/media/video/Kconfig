@@ -1198,8 +1198,17 @@ config MSM_CAMERA_DEBUG
 	help
 	  Enable printk() debug for msm camera
 
+config SENSE4_HAL
+       bool "Sense 4 HAL compatbility"
+       depends on MSM_CAMERA
+       default n
 
+if SENSE4_HAL
+source "drivers/media/video/msm_s4/Kconfig"
+endif
+if !SENSE4_HAL
 source "drivers/media/video/msm/Kconfig"
+endif
 
 endif # V4L_PLATFORM_DRIVERS
 endif # VIDEO_CAPTURE_DRIVERS

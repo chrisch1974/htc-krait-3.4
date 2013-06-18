@@ -295,6 +295,7 @@ struct pm8921_chg_chip {
 	struct wake_lock		recharge_check_wake_lock;
 	enum pm8921_chg_cold_thr	cold_thr;
 	enum pm8921_chg_hot_thr		hot_thr;
+	int				rconn_mohm;
 	u8				active_path;
 };
 
@@ -362,6 +363,18 @@ static int pm8921_chg_set_lpm(struct pm8921_chg_chip *chip, int enable)
 
 	return rc;
 }
+
+#define VDD_LOOP_ACTIVE_BIT	BIT(3)
+#define VDD_MAX_INCREASE_MV	20
+static int vdd_max_increase_mv = VDD_MAX_INCREASE_MV;
+module_param(vdd_max_increase_mv, int, 0644);
+
+static int ichg_threshold_ua = -200000;
+module_param(ichg_threshold_ua, int, 0644);
+
+static int delta_threshold_mv = -5; 
+module_param(delta_threshold_mv, int, 0644);
+static int last_delta_mv = 0;
 
 static int pm_chg_write(struct pm8921_chg_chip *chip, u16 addr, u8 reg)
 {
@@ -850,6 +863,31 @@ static int pm_chg_vbatdet_set(struct pm8921_chg_chip *chip, int voltage)
 	pr_debug("voltage=%d setting %02x\n", voltage, temp);
 	return pm_chg_masked_write(chip, CHG_VBAT_DET, PM8921_CHG_V_MASK, temp);
 }
+
+
+
+static int set_appropriate_vbatdet(struct pm8921_chg_chip *chip)
+{
+	int rc = 0;
+	int vbat = 0;
+
+	if (chip->is_bat_cool)
+		vbat = chip->cool_bat_voltage - chip->resume_voltage_delta;
+	else if (chip->is_bat_warm)
+		vbat = chip->warm_bat_voltage - chip->resume_voltage_delta;
+	else
+		vbat = chip->max_voltage_mv- chip->resume_voltage_delta;
+
+	rc = pm_chg_vbatdet_set(chip, vbat);
+
+	if (rc)
+		pr_err("Failed to set vbatdet=%d rc=%d\n", vbat, rc);
+	else
+		pr_info("%s, vbat=%d, is_bat_cool=%d, is_bat_warm=%d\n", __func__, vbat, chip->is_bat_cool, chip->is_bat_warm);
+
+	return rc;
+}
+
 
 #define PM8921_CHG_VINMIN_MIN_MV	3800
 #define PM8921_CHG_VINMIN_STEP_MV	100
@@ -2119,6 +2157,8 @@ int pm8921_charger_get_attr_text(char *buf, int size)
 	get_reg((void *)CHG_VDD_SAFE, &val);
 	len += scnprintf(buf + len, size - len,
 			"CHG_VDD_SAFE: 0x%llx;\n", val);
+	len += scnprintf(buf + len, size - len,
+			"last_delta_batt_terminal_mv: %d;\n", last_delta_mv);
 	get_reg((void *)CHG_VBAT_DET, &val);
 	len += scnprintf(buf + len, size - len,
 			"CHG_VBAT_DET: 0x%llx;\n", val);
@@ -2374,7 +2414,8 @@ static void handle_usb_present_change(struct pm8921_chg_chip *chip,
 				pr_err("Failed to set vbatdet=%d rc=%d\n",
 						PM8921_CHG_VBATDET_MAX, rc);
 		}
-		usbin_ov_irq_handler(chip->pmic_chg_irq[USBIN_OV_IRQ], chip);
+		if (!the_chip->cable_in_irq)
+			usbin_ov_irq_handler(chip->pmic_chg_irq[USBIN_OV_IRQ], chip);
 	}
 
 	if (usb_present) {
@@ -2657,6 +2698,84 @@ int pm8921_regulate_input_voltage(int voltage)
 		the_chip->vin_min = voltage;
 
 	return rc;
+}
+
+static void adjust_vdd_max_for_fastchg(struct pm8921_chg_chip *chip)
+{
+	int ichg_meas_ua, vbat_uv;
+	int ichg_meas_ma;
+	int adj_vdd_max_mv, programmed_vdd_max;
+	int vbat_batt_terminal_uv;
+	int vbat_batt_terminal_mv;
+	int reg_loop;
+	int delta_mv = 0;
+
+	if (chip->rconn_mohm == 0) {
+		pr_debug("Exiting as rconn_mohm is 0\n");
+		return;
+	}
+	
+	if (chip->is_bat_cool || chip->is_bat_warm) {
+		pr_info("Exiting is_bat_cool = %d is_batt_warm = %d\n",
+				chip->is_bat_cool, chip->is_bat_warm);
+		return;
+	}
+
+	reg_loop = pm_chg_get_regulation_loop(chip);
+	if (!(reg_loop & VDD_LOOP_ACTIVE_BIT)) {
+		pr_debug("Exiting Vdd loop is not active reg loop=0x%x\n",
+			reg_loop);
+		return;
+	}
+
+	pm8921_bms_get_simultaneous_battery_voltage_and_current(&ichg_meas_ua,
+								&vbat_uv);
+	if (ichg_meas_ua >= 0) {
+		pr_debug("Exiting ichg_meas_ua = %d > 0\n", ichg_meas_ua);
+		return;
+	}
+	if (ichg_meas_ua <= ichg_threshold_ua) {
+		pr_debug("Exiting ichg_meas_ua = %d < ichg_threshold_ua = %d\n",
+					ichg_meas_ua, ichg_threshold_ua);
+		return;
+	}
+	ichg_meas_ma = ichg_meas_ua / 1000;
+
+	
+	vbat_batt_terminal_uv = vbat_uv + ichg_meas_ma * chip->rconn_mohm;
+	vbat_batt_terminal_mv = vbat_batt_terminal_uv/1000;
+	pm_chg_vddmax_get(the_chip, &programmed_vdd_max);
+
+	last_delta_mv = delta_mv =  chip->max_voltage_mv - vbat_batt_terminal_mv;
+	pr_info("%s: rconn_mohm=%d, reg_loop=0x%x, vbat_uv=%d, ichg_ma=%d, "
+			"vbat_terminal_mv=%d, delta_mv=%d\n",
+			__func__, chip->rconn_mohm, reg_loop, vbat_uv, ichg_meas_ma,
+			vbat_batt_terminal_mv, delta_mv);
+	if (delta_mv > delta_threshold_mv && delta_mv <= 0) {
+		pr_debug("skip delta_mv=%d since it is between %d and 0\n",
+				delta_mv, delta_threshold_mv);
+		return;
+	}
+
+	adj_vdd_max_mv = programmed_vdd_max + delta_mv;
+	pr_debug("vdd_max needs to be changed by %d mv from %d to %d\n",
+			delta_mv,
+			programmed_vdd_max,
+			adj_vdd_max_mv);
+
+	if (adj_vdd_max_mv < chip->max_voltage_mv) {
+		pr_debug("adj vdd_max lower than default max voltage\n");
+		return;
+	}
+
+	if (adj_vdd_max_mv > (chip->max_voltage_mv + vdd_max_increase_mv))
+		adj_vdd_max_mv = chip->max_voltage_mv + vdd_max_increase_mv;
+
+	pr_info("%s: adjusting vdd_max_mv to %d from %d to make "
+		"vbat_batt_termial_uv = %d to %d\n",
+		__func__, adj_vdd_max_mv, programmed_vdd_max, vbat_batt_terminal_uv,
+		chip->max_voltage_mv);
+	pm_chg_vddmax_set(chip, adj_vdd_max_mv);
 }
 
 #define USB_OV_THRESHOLD_MASK  0x60
@@ -4423,7 +4542,6 @@ int pm_chg_program_vbatdet(struct pm8921_chg_chip *chip)
 	if (rc)
 		pr_err("Failed to set vbatdet=%d rc=%d\n",
 				vbat_programmed - chip->resume_voltage_delta, rc);
-
 	return rc;
 }
 
@@ -4464,6 +4582,23 @@ void pwrsrc_under_rating_check(void)
 		htc_charger_event_notify(HTC_CHARGER_EVENT_SRC_UNDER_RATING);
 }
 
+static int rconn_mohm;
+static int set_rconn_mohm(const char *val, struct kernel_param *kp)
+{
+	int ret;
+	struct pm8921_chg_chip *chip = the_chip;
+
+	ret = param_set_int(val, kp);
+	if (ret) {
+		pr_err("error setting value %d\n", ret);
+		return ret;
+	}
+	if (chip)
+		chip->rconn_mohm = rconn_mohm;
+	return 0;
+}
+module_param_call(rconn_mohm, set_rconn_mohm, param_get_uint,
+					&rconn_mohm, 0644);
 #define CONSECUTIVE_COUNT	3
 #define EOC_STOP_CHG_COUNT	(CONSECUTIVE_COUNT + 180)
 #define CLEAR_FULL_STATE_BY_LEVEL_THR		90
@@ -4505,7 +4640,7 @@ static void eoc_worker(struct work_struct *work)
 	if (EOC_STOP_CHG_COUNT == eoc_count) {
 		eoc_count = 0;
 		is_ac_safety_timeout_twice = false;
-		pm_chg_program_vbatdet(chip);
+		set_appropriate_vbatdet(chip);
 		pm_chg_disable_auto_enable(chip, 1, BATT_CHG_DISABLED_BIT_EOC);
 
 		if (is_ext_charging(chip))
@@ -4535,7 +4670,7 @@ static void eoc_worker(struct work_struct *work)
 		if (chip->is_bat_warm || chip->is_bat_cool) {
 			pr_info("meet %s EOC condition.\n",
 								(chip->is_bat_warm) ? "warm" : "cool");
-			pm_chg_program_vbatdet(chip);
+			set_appropriate_vbatdet(chip);
 			pm_chg_disable_auto_enable(chip, 1, BATT_CHG_DISABLED_BIT_EOC);
 			is_batt_full = false;
 			
@@ -4562,6 +4697,7 @@ static void eoc_worker(struct work_struct *work)
 		}
 	}
 
+	adjust_vdd_max_for_fastchg(chip);
 	pr_debug("EOC count = %d\n", eoc_count);
 	schedule_delayed_work(&chip->eoc_work,
 		      round_jiffies_relative(msecs_to_jiffies
@@ -4630,7 +4766,11 @@ int pm8921_limit_charge_enable(bool enable)
 #define TEMP_HYSTERISIS_DECIDEGC 20
 static void battery_cool(bool enter)
 {
-	pr_info("%s:enter=%d\n", __func__, enter);
+	static int prev_is_cold;
+	int is_cold = pm_chg_get_rt_status(the_chip, BATTTEMP_COLD_IRQ);
+
+	pr_info("%s:enter=%d, is_cold=%d\n", __func__, enter, is_cold);
+
 	if (enter == the_chip->is_bat_cool)
 		return;
 	the_chip->is_bat_cool = enter;
@@ -4639,22 +4779,25 @@ static void battery_cool(bool enter)
 			the_chip->cool_temp_dc + TEMP_HYSTERISIS_DECIDEGC;
 		set_appropriate_battery_current(the_chip);
 		pm_chg_vddmax_set(the_chip, the_chip->cool_bat_voltage);
-		pm_chg_vbatdet_set(the_chip,
-			the_chip->cool_bat_voltage
-			- the_chip->resume_voltage_delta);
-		htc_gauge_event_notify(HTC_GAUGE_EVENT_TEMP_ZONE_CHANGE);
 	} else {
 		btm_config.low_thr_temp = the_chip->cool_temp_dc;
 		set_appropriate_battery_current(the_chip);
 		pm_chg_vddmax_set(the_chip, the_chip->max_voltage_mv);
-		pm_chg_vbatdet_set(the_chip, PM8921_CHG_VBATDET_MAX);
-		htc_gauge_event_notify(HTC_GAUGE_EVENT_TEMP_ZONE_CHANGE);
 	}
 
-	
-	if(the_chip->ext_usb)
+	set_appropriate_vbatdet(the_chip);
+
+	if(is_cold != prev_is_cold)
 	{
-		queue_delayed_work(ext_charger_wq, &ext_usb_temp_task, HZ/200);
+		htc_gauge_event_notify(HTC_GAUGE_EVENT_TEMP_ZONE_CHANGE);
+
+		
+		if(the_chip->ext_usb)
+		{
+			queue_delayed_work(ext_charger_wq, &ext_usb_temp_task, HZ/200);
+		}
+
+		prev_is_cold = is_cold;
 	}
 
 	schedule_work(&btm_config_work);
@@ -4671,18 +4814,15 @@ static void battery_warm(bool enter)
 			the_chip->warm_temp_dc - TEMP_HYSTERISIS_DECIDEGC;
 		set_appropriate_battery_current(the_chip);
 		pm_chg_vddmax_set(the_chip, the_chip->warm_bat_voltage);
-		pm_chg_vbatdet_set(the_chip,
-			the_chip->warm_bat_voltage
-			- the_chip->resume_voltage_delta);
 		htc_gauge_event_notify(HTC_GAUGE_EVENT_TEMP_ZONE_CHANGE);
 	} else {
 		btm_config.high_thr_temp = the_chip->warm_temp_dc;
 		set_appropriate_battery_current(the_chip);
 		pm_chg_vddmax_set(the_chip, the_chip->max_voltage_mv);
-		pm_chg_vbatdet_set(the_chip, PM8921_CHG_VBATDET_MAX);
 		htc_gauge_event_notify(HTC_GAUGE_EVENT_TEMP_ZONE_CHANGE);
 	}
 
+	set_appropriate_vbatdet(the_chip);
 	
 	if(the_chip->ext_usb)
 	{
@@ -4917,7 +5057,8 @@ static void __devinit determine_initial_state(struct pm8921_chg_chip *chip)
 
 	pm8921_chg_enable_irq(chip, DCIN_VALID_IRQ);
 	pm8921_chg_enable_irq(chip, USBIN_VALID_IRQ);
-	pm8921_chg_enable_irq(chip, BATT_REMOVED_IRQ);
+	if (!chip->is_embeded_batt)
+		pm8921_chg_enable_irq(chip, BATT_REMOVED_IRQ);
 	pm8921_chg_enable_irq(chip, BATT_INSERTED_IRQ);
 	
 	
@@ -5077,10 +5218,12 @@ err_out:
 #define CHG_BAT_TEMP_DIS_BIT	BIT(2)
 #define SAFE_CURRENT_MA		1500
 #define VREF_BATT_THERM_FORCE_ON	BIT(7)
+#define PM_SUB_REV		0x001
 static int __devinit pm8921_chg_hw_init(struct pm8921_chg_chip *chip)
 {
-	int rc;
+	int rc, vdd_safe;
 	unsigned long flags;
+	u8 subrev;
 
 	rc = pm8921_apply_19p2mhz_kickstart(chip);
 	if (rc) {
@@ -5100,7 +5243,13 @@ static int __devinit pm8921_chg_hw_init(struct pm8921_chg_chip *chip)
 		return rc;
 	}
 
-	rc = pm_chg_vddsafe_set(chip, chip->max_voltage_mv);
+	vdd_safe = chip->max_voltage_mv + VDD_MAX_INCREASE_MV;
+
+	if (vdd_safe > PM8921_CHG_VDDSAFE_MAX)
+		vdd_safe = PM8921_CHG_VDDSAFE_MAX;
+
+	rc = pm_chg_vddsafe_set(chip, vdd_safe);
+
 	if (rc) {
 		pr_err("Failed to set safe voltage to %d rc=%d\n",
 						chip->max_voltage_mv, rc);
@@ -5273,8 +5422,26 @@ static int __devinit pm8921_chg_hw_init(struct pm8921_chg_chip *chip)
 
 	
 	if (pm8xxx_get_revision(chip->dev->parent) == PM8XXX_REVISION_8921_3p0
-		&& pm8xxx_get_version(chip->dev->parent) == PM8XXX_VERSION_8921)
-		pm_chg_write(chip, CHG_BUCK_CTRL_TEST3, 0xAC);
+		&& pm8xxx_get_version(chip->dev->parent) == PM8XXX_VERSION_8921) {
+		rc = pm8xxx_readb(chip->dev->parent, PM_SUB_REV, &subrev);
+		if (rc) {
+			pr_err("read failed: addr=%03X, rc=%d\n",
+				PM_SUB_REV, rc);
+			return rc;
+		}
+		
+		if (subrev & 0x1) {
+			pm8xxx_writeb(chip->dev->parent,
+				CHG_BUCK_CTRL_TEST3, 0xA4);
+			pr_info("%s: write 0x%x as A4 for PMIC 3.0.1",
+					__func__, CHG_BUCK_CTRL_TEST3);
+		} else {
+			pm8xxx_writeb(chip->dev->parent,
+				CHG_BUCK_CTRL_TEST3, 0xAC);
+			pr_info("%s: write 0x%x as AC for PMIC 3.0",
+					__func__, CHG_BUCK_CTRL_TEST3);
+		}
+	}
 
 	pm_chg_write(chip, CHG_BUCK_CTRL_TEST3, 0xD9);
 
@@ -5815,6 +5982,7 @@ static int __devinit pm8921_charger_probe(struct platform_device *pdev)
 	chip->is_embeded_batt = pdata->is_embeded_batt;
 	chip->cold_thr = pdata->cold_thr;
 	chip->hot_thr = pdata->hot_thr;
+	chip->rconn_mohm = pdata->rconn_mohm;
 
 	chip->ext_usb = pdata->ext_usb;
 	chip->disable_reverse_boost_check = pdata->disable_reverse_boost_check;
@@ -5883,7 +6051,8 @@ static int __devinit pm8921_charger_probe(struct platform_device *pdev)
 	enable_irq_wake(chip->pmic_chg_irq[DCIN_VALID_IRQ]);
 	enable_irq_wake(chip->pmic_chg_irq[VBATDET_LOW_IRQ]);
 	enable_irq_wake(chip->pmic_chg_irq[FASTCHG_IRQ]);
-	enable_irq_wake(chip->pmic_chg_irq[BATT_REMOVED_IRQ]);
+	if (!chip->is_embeded_batt)
+		enable_irq_wake(chip->pmic_chg_irq[BATT_REMOVED_IRQ]);
 	enable_irq_wake(chip->pmic_chg_irq[CHGHOT_IRQ]);
 	if (chip->cable_in_irq)
 		enable_irq_wake(chip->cable_in_irq);
